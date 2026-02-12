@@ -1,0 +1,770 @@
+---
+title: "MD_Analysis_race"
+author: "Leng Seong Che & Casey F. Breen"
+date: "2026-01-08"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(here)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(MASS) 
+library(lubridate)
+library(caret)
+library(splines)
+library(glmnet)
+library(tidyr)
+library(kableExtra)
+library(brms)
+```
+
+```{r}
+MD_aggregate_month_cause <- read_csv(here("data", "Mortality data", "Aggregate cause-specific files", "MD_aggregate_month-cause - v1.csv"))
+MD_pop <- read_csv(here("data", "Denominator data", "Census counts", "MD_population - v1.csv"))
+MD_soldiers <- read_csv(here("data", "Denominator data", "Drafted soldier counts", "MD_soldiers - v1.csv"))
+```
+
+```{r}
+death_month <- MD_aggregate_month_cause %>%
+  mutate(year = as.integer(year),
+         month = as.integer(month),
+         ym = as.Date(sprintf("%04d-%02d-01", year, month))) %>%
+  group_by(ym,race) %>%
+  summarise(monthly_deaths = sum(deaths, na.rm = TRUE), .groups = "drop")
+
+pandemic_start <- as.Date("1918-03-01")
+pandemic_end   <- as.Date("1920-05-01")
+
+ggplot(death_month, aes(x = ym, y = monthly_deaths, color = race)) +
+  geom_rect(
+    data = data.frame(xmin = pandemic_start, xmax = pandemic_end, ymin = -Inf, ymax = Inf),
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+    fill = "orange", alpha = 0.12, inherit.aes = FALSE
+  ) +
+  geom_line(linewidth = 0.8) +
+  #geom_smooth(method = "loess", span = 0.2, se = FALSE) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(
+    x = "Month",
+    y = "Number of deaths",
+    title = "All-Cause Death Counts per Month in Rural Maryland, by Race",
+    color = "Race"
+  ) +
+  theme_minimal()
+```
+
+# Weather 
+
+## Humidity
+
+```{r}
+MD_weather <- read_csv(here("data", "Weather data", "MD_weather - v1.csv"))
+```
+
+```{r}
+precip_month <- MD_weather %>%
+  mutate(ym = as.Date(sprintf("%04d-%02d-01", year, month))) %>%
+  group_by(ym) %>%
+  summarise(precip = mean(precipitation1, na.rm = TRUE), .groups = "drop")
+
+precip_month <- death_month %>% 
+  mutate(year = year(ym), month = month(ym))%>% 
+  left_join(precip_month, by = "ym")
+
+precip_month <- precip_month %>%                    
+  group_by(month) %>%
+  mutate(
+    mean_precip_month = mean(precip, na.rm = TRUE),
+    sd_precip_month   = sd(precip,   na.rm = TRUE),
+    high_precip = ifelse(precip > mean_precip_month, 1, 0),
+    very_high_precip = ifelse(precip > mean_precip_month + sd_precip_month, 1, 0)
+  ) %>%
+  ungroup()
+```
+
+## Temperature
+
+```{r}
+temp_month <- MD_weather %>%
+  mutate(ym = as.Date(sprintf("%04d-%02d-01", year, month))) %>%
+  group_by(ym) %>%
+  summarise(monthly_mean_temp = mean(temperature1, na.rm = TRUE), 
+            monthly_mean_avg_temp = mean(temperature2, na.rm = TRUE),
+            .groups = "drop")
+
+temp_month <- death_month %>% 
+  mutate(year = year(ym), month = month(ym))%>% 
+  left_join(temp_month, by = "ym")
+
+temp_month <- temp_month %>%                    
+  group_by(month) %>%
+  mutate(
+    mean_temp_month = mean(monthly_mean_temp, na.rm = TRUE),
+    mean_avg_temp_month = mean(monthly_mean_avg_temp, na.rm = TRUE),
+    sd_temp_month   = sd(monthly_mean_temp,   na.rm = TRUE),
+    sd_avg_temp_month = sd(monthly_mean_avg_temp, na.rm = TRUE),
+    high_temp = ifelse(monthly_mean_temp > mean_temp_month, 1, 0),
+    very_high_temp = ifelse(monthly_mean_temp > mean_temp_month + sd_temp_month, 1, 0),
+    high_avg_temp = ifelse(monthly_mean_avg_temp > mean_avg_temp_month, 1, 0),
+    very_high_avg_temp = ifelse(monthly_mean_avg_temp > mean_avg_temp_month + sd_avg_temp_month, 1, 0)
+  ) %>%
+  ungroup()
+```
+
+# CDR
+
+```{r}
+MD_pop_year <- MD_pop %>%
+  group_by(year, race) %>%
+  summarise(pop = sum(population, na.rm=TRUE), .groups = "drop")
+
+decimal_year <- function(d) { d <- as.Date(d); year(d) + (month(d) - 0.5)/12 }
+
+all_months <- sort(unique(as.Date(death_month$ym)))
+all_dec    <- decimal_year(all_months)
+
+pop_monthly_race <- MD_pop_year %>%
+  arrange(race, year) %>%
+  group_by(race) %>%
+  do({
+    census_years <- .$year
+    census_pops  <- .$pop
+    data.frame(
+      ym = all_months,
+      race = unique(.$race),
+      pop_interp = exp(approx(
+        x = census_years,
+        y = log(census_pops),
+        xout = all_dec,
+        rule = 2
+      )$y)
+    )
+  }) %>%
+  ungroup()
+
+
+death_month <- death_month %>%
+  left_join(pop_monthly_race, by = c("ym", "race")) %>%
+  mutate(crude_rate_100k = monthly_deaths / pop_interp * 100000)
+
+ggplot(death_month, aes(x = ym, y = crude_rate_100k, color = race)) +
+  geom_line() +
+  labs(
+    x = "Month",
+    y = "Crude death rate per 100,000",
+    title = "Monthly crude death rates by race (Rural Maryland)",
+    color = "Race"
+  ) +
+  theme_minimal()
+```
+
+# Modeling
+
+
+```{r}
+month_tab <- precip_month %>%
+  left_join(
+    temp_month %>%
+      dplyr::select(-"ym",-"monthly_deaths" ),
+    by = c("year", "month","race"))%>%
+  mutate(month_f = factor(month, levels = 1:12, labels = month.abb))
+
+month_tab <- month_tab %>%
+  left_join(
+    death_month %>%
+      dplyr::select(-"monthly_deaths"),
+    by = c("ym","race"))
+
+dat_white <- month_tab %>% filter(race == "White")
+dat_nonwhite <- month_tab %>% filter(race == "Non-white")
+```
+
+## pre pandemic
+
+### White
+
+#### OLS
+
+```{r}
+train <- dat_white %>% filter(year <= 1916)
+test  <- dat_white %>% filter(ym >= as.Date("1917-01-01") & ym <= as.Date("1918-02-01"))
+
+#### OLS ####
+mod_1 <- lm( monthly_deaths ~ month_f , data = train)
+mod_2 <- lm( monthly_deaths ~ month_f + log(pop_interp), data = train)
+mod_3 <- lm( monthly_deaths ~ month_f + log(pop_interp) + high_temp , data = train)
+mod_4 <- lm( monthly_deaths ~ month_f + log(pop_interp) + high_temp + high_precip, data = train)
+mod_5 <- lm( monthly_deaths ~ month_f + log(pop_interp) + high_temp * high_precip , data = train)
+mod_6 <- lm( monthly_deaths ~  month_f + log(pop_interp) + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip, data = train)
+
+mod_7 <- lm( monthly_deaths ~  month_f  + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip, data = train)
+
+####### RMSE #######
+test <- test %>%
+  mutate(pred_mod1 = predict(mod_1, newdata = test, type="response"))
+
+test <- test %>%
+  mutate(pred_mod2 = predict(mod_2, newdata = test), type="response")
+
+test <- test %>%
+  mutate(pred_mod3 = predict(mod_3, newdata = test, type="response"))
+
+test <- test %>%
+  mutate(pred_mod4 = predict(mod_4, newdata = test, type="response"))
+
+test <- test %>%
+  mutate(pred_mod5 = predict(mod_5, newdata = test, type="response"))
+
+test <- test %>%
+  mutate(pred_mod6 = predict(mod_6, newdata = test, type="response"))
+
+test <- test %>%
+  mutate(pred_mod7 = predict(mod_7, newdata = test, type="response"))
+
+rmse <- function(y, yhat) sqrt(mean((y - yhat)^2, na.rm = TRUE))
+
+rmse_mod1 <- rmse(test$monthly_deaths, test$pred_mod1)
+rmse_mod2 <- rmse(test$monthly_deaths, test$pred_mod2)
+rmse_mod3 <- rmse(test$monthly_deaths, test$pred_mod3)
+rmse_mod4 <- rmse(test$monthly_deaths, test$pred_mod4)
+rmse_mod5 <- rmse(test$monthly_deaths, test$pred_mod5)
+rmse_mod6 <- rmse(test$monthly_deaths, test$pred_mod6)
+rmse_mod7 <- rmse(test$monthly_deaths, test$pred_mod7)
+
+rmse_mod1;rmse_mod2;rmse_mod3;rmse_mod4;rmse_mod5;rmse_mod6;rmse_mod7
+
+```
+
+```{r}
+###### CV ###
+set.seed(8287)
+cv_5fold <- trainControl(method = "cv", number = 5)
+
+cv_rmse_mod1 <- train(monthly_deaths ~ month_f , data = train, method = "lm", trControl = cv_5fold)$results$RMSE
+cv_rmse_mod2 <- train(monthly_deaths ~ month_f + log(pop_interp) , data = train, method = "lm", trControl = cv_5fold)$results$RMSE
+cv_rmse_mod3 <- train(monthly_deaths ~ month_f + log(pop_interp) + high_temp , data = train, method = "lm", trControl = cv_5fold)$results$RMSE
+cv_rmse_mod4 <- train(monthly_deaths ~ month_f + log(pop_interp) + high_temp + high_precip , data = train, method = "lm", trControl = cv_5fold)$results$RMSE 
+cv_rmse_mod5 <- train(monthly_deaths ~ month_f + log(pop_interp) + high_temp * high_precip , data = train, method = "lm", trControl = cv_5fold)$results$RMSE 
+cv_rmse_mod6 <- train(monthly_deaths ~ month_f + log(pop_interp) + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip, 
+      data = train, method = "lm", trControl = cv_5fold)$results$RMSE
+
+cv_rmse_mod7 <- train(monthly_deaths ~ month_f  + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip, 
+      data = train, method = "lm", trControl = cv_5fold)$results$RMSE
+
+cv_rmse_mod1;cv_rmse_mod2;cv_rmse_mod3;cv_rmse_mod4;cv_rmse_mod5;cv_rmse_mod6; cv_rmse_mod7
+
+```
+
+#### lasso
+
+```{r}
+set.seed(8287)
+form <- monthly_deaths ~ month_f  + log(pop_interp) +
+  monthly_mean_temp + high_temp + very_high_temp +
+  monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp +
+  precip + high_precip + very_high_precip
+
+#### lasso ####
+x_train <- model.matrix(form, data = train)[, -1]
+y_train <- train$monthly_deaths
+
+x_test  <- model.matrix(form, data = test)[, -1]
+y_test  <- test$monthly_deaths
+
+cv_lasso <- cv.glmnet(x_train, y_train, alpha = 1, family = "gaussian", nfolds = 5)
+
+lambda_lasso_min <- cv_lasso$lambda.min
+lambda_lasso_1se <- cv_lasso$lambda.1se
+
+pred_lasso_min <- predict(cv_lasso, s = lambda_lasso_min, newx = x_test)
+
+cv_rmse_lasso <- sqrt(min(cv_lasso$cvm))
+rmse_lasso <- rmse(y_test, pred_lasso_min)
+# coef(cv_lasso, s = cv_lasso$lambda.min)
+
+cv_rmse_lasso
+rmse_lasso
+```
+
+#### Bayesian
+
+##### Poisson 
+
+```{r}
+set.seed(8287)
+fit_naive <- brm(monthly_deaths ~ month_f + offset(log(pop_interp)),
+            data = train, family = poisson())
+
+fit_all <- brm(monthly_deaths ~ month_f  + offset(log(pop_interp)) + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip,
+            data = train, family = poisson())
+
+fit_selected_poi <- brm(monthly_deaths ~ month_f  + offset(log(pop_interp)) + monthly_mean_avg_temp + very_high_avg_temp,
+            data = train, family = poisson())
+
+test <- test %>%
+  mutate(pred_mod_b_poi = fitted(fit_naive, newdata = test)[, "Estimate"])
+
+test <- test %>%
+  mutate(pred_mod_b_poi_all = fitted(fit_all, newdata = test)[, "Estimate"])
+
+test <- test %>%
+  mutate(pred_mod_b_poi_selected = fitted(fit_selected_poi, newdata = test)[, "Estimate"])
+
+rmse_mod_b_poi <- rmse(test$monthly_deaths, test$pred_mod_b_poi)
+rmse_mod_b_poi_all <- rmse(test$monthly_deaths, test$pred_mod_b_poi_all)
+rmse_mod_b_poi_selected <- rmse(test$monthly_deaths, test$pred_mod_b_poi_selected)
+
+rmse_mod_b_poi; rmse_mod_b_poi_all; rmse_mod_b_poi_selected
+```
+
+
+##### Negative Binomial
+
+```{r}
+set.seed(8287)
+fit_naive_nb <- brm(monthly_deaths ~ month_f + offset(log(pop_interp)) ,
+            data = train, family = negbinomial())
+
+fit_all_nb <- brm(monthly_deaths ~ month_f  + offset(log(pop_interp)) + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip,
+            data = train, family = negbinomial())
+
+fit_selected_nb <- brm(monthly_deaths ~ month_f  + offset(log(pop_interp)) + monthly_mean_avg_temp + very_high_avg_temp,
+            data = train, family = negbinomial())
+
+test <- test %>%
+  mutate(pred_mod_b_nb = fitted(fit_naive_nb, newdata = test)[, "Estimate"])
+
+test <- test %>%
+  mutate(pred_mod_b_ng_all = fitted(fit_all_nb, newdata = test)[, "Estimate"])
+
+test <- test %>%
+  mutate(pred_mod_b_ng_selected = fitted(fit_selected_nb, newdata = test)[, "Estimate"])
+
+rmse_mod_b_nb <- rmse(test$monthly_deaths, test$pred_mod_b_nb)
+rmse_mod_b_ng_all <- rmse(test$monthly_deaths, test$pred_mod_b_ng_all)
+rmse_mod_b_ng_selected <- rmse(test$monthly_deaths, test$pred_mod_b_ng_selected)
+
+rmse_mod_b_nb;rmse_mod_b_ng_all;rmse_mod_b_ng_selected
+```
+
+```{r}
+rmse_tab <- data.frame(
+  Model    = c("OLS_short", "OLS_full", "Lasso", "b_Poisson_naive", "b_NegBin_naive", "b_Poisson_all", "b_NegBin_all", "b_NegBin_selected", "b_Poisson_selected"),
+  CV_RMSE  = round(c(cv_rmse_mod1, cv_rmse_mod6, cv_rmse_lasso, NA, NA, NA, NA, NA, NA), 2),
+  Test_RMSE = round(c(rmse_mod1, rmse_mod6, rmse_lasso, rmse_mod_b_poi, rmse_mod_b_nb, rmse_mod_b_poi_all,
+                      rmse_mod_b_ng_all,rmse_mod_b_ng_selected, rmse_mod_b_poi_selected), 2)
+)
+
+kable(rmse_tab, caption = "5-Fold CV and Test RMSEs")
+```
+
+### Non-White 
+
+#### OLS
+
+```{r}
+train2 <- dat_nonwhite %>% filter(year <= 1916)
+test2  <- dat_nonwhite %>% filter(ym >= as.Date("1917-01-01") & ym <= as.Date("1918-02-01"))
+
+#### OLS ####
+mod_1_nw <- lm( monthly_deaths ~ month_f , data = train2)
+mod_2_nw <- lm( monthly_deaths ~ month_f + log(pop_interp), data = train2)
+mod_3_nw <- lm( monthly_deaths ~ month_f + log(pop_interp) + high_temp , data = train2)
+mod_4_nw <- lm( monthly_deaths ~ month_f + log(pop_interp) + high_temp + high_precip, data = train2)
+mod_5_nw <- lm( monthly_deaths ~ month_f + log(pop_interp) + high_temp * high_precip , data = train2)
+mod_6_nw <- lm( monthly_deaths ~  month_f + log(pop_interp) + monthly_mean_temp + high_temp + very_high_temp +
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip, data = train2)
+
+mod_7_nw <- lm( monthly_deaths ~  month_f  + monthly_mean_temp + high_temp + very_high_temp +
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip, data = train2)
+
+####### RMSE #######
+test2 <- test2 %>%
+  mutate(pred_mod1 = predict(mod_1_nw, newdata = test2, type="response"))
+
+test2 <- test2 %>%
+  mutate(pred_mod2 = predict(mod_2_nw, newdata = test2), type="response")
+
+test2 <- test2 %>%
+  mutate(pred_mod3 = predict(mod_3_nw, newdata = test2, type="response"))
+
+test2 <- test2 %>%
+  mutate(pred_mod4 = predict(mod_4_nw, newdata = test2, type="response"))
+
+test2 <- test2 %>%
+  mutate(pred_mod5 = predict(mod_5_nw, newdata = test2, type="response"))
+
+test2 <- test2 %>%
+  mutate(pred_mod6 = predict(mod_6_nw, newdata = test2, type="response"))
+
+test2 <- test2 %>%
+  mutate(pred_mod7 = predict(mod_7_nw, newdata = test2, type="response"))
+
+rmse <- function(y, yhat) sqrt(mean((y - yhat)^2, na.rm = TRUE))
+
+rmse_mod1_nw <- rmse(test2$monthly_deaths, test2$pred_mod1)
+rmse_mod2_nw <- rmse(test2$monthly_deaths, test2$pred_mod2)
+rmse_mod3_nw <- rmse(test2$monthly_deaths, test2$pred_mod3)
+rmse_mod4_nw <- rmse(test2$monthly_deaths, test2$pred_mod4)
+rmse_mod5_nw <- rmse(test2$monthly_deaths, test2$pred_mod5)
+rmse_mod6_nw <- rmse(test2$monthly_deaths, test2$pred_mod6)
+rmse_mod7_nw <- rmse(test2$monthly_deaths, test2$pred_mod7)
+
+rmse_mod1_nw;rmse_mod2_nw;rmse_mod3_nw;rmse_mod4_nw;rmse_mod5_nw;rmse_mod6_nw;rmse_mod7_nw
+
+```
+
+```{r}
+###### CV ###
+set.seed(8287)
+cv_5fold <- trainControl(method = "cv", number = 5)
+
+cv_rmse_mod1_nw <- train(monthly_deaths ~ month_f , data = train2, method = "lm", trControl = cv_5fold)$results$RMSE
+cv_rmse_mod2_nw <- train(monthly_deaths ~ month_f + log(pop_interp) , data = train2, method = "lm", trControl = cv_5fold)$results$RMSE
+cv_rmse_mod3_nw <- train(monthly_deaths ~ month_f + log(pop_interp) + high_temp , data = train2, method = "lm", trControl = cv_5fold)$results$RMSE
+cv_rmse_mod4_nw <- train(monthly_deaths ~ month_f + log(pop_interp) + high_temp + high_precip , data = train2, method = "lm", trControl = cv_5fold)$results$RMSE
+cv_rmse_mod5_nw <- train(monthly_deaths ~ month_f + log(pop_interp) + high_temp * high_precip , data = train2, method = "lm", trControl = cv_5fold)$results$RMSE
+cv_rmse_mod6_nw <- train(monthly_deaths ~ month_f + log(pop_interp) + monthly_mean_temp + high_temp + very_high_temp +
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip,
+      data = train2, method = "lm", trControl = cv_5fold)$results$RMSE
+
+cv_rmse_mod7_nw <- train(monthly_deaths ~ month_f  + monthly_mean_temp + high_temp + very_high_temp +
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip,
+      data = train2, method = "lm", trControl = cv_5fold)$results$RMSE
+
+cv_rmse_mod1_nw;cv_rmse_mod2_nw;cv_rmse_mod3_nw;cv_rmse_mod4_nw;cv_rmse_mod5_nw;cv_rmse_mod6_nw; cv_rmse_mod7_nw
+
+```
+
+#### lasso
+
+```{r}
+set.seed(8287)
+form <- monthly_deaths ~ month_f  + log(pop_interp) +
+  monthly_mean_temp + high_temp + very_high_temp +
+  monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp +
+  precip + high_precip + very_high_precip
+
+#### lasso ####
+x_train2 <- model.matrix(form, data = train2)[, -1]
+y_train2 <- train2$monthly_deaths
+
+x_test2  <- model.matrix(form, data = test2)[, -1]
+y_test2 <- test2$monthly_deaths
+
+cv_lasso_nw <- cv.glmnet(x_train2, y_train2, alpha = 1, family = "gaussian", nfolds = 5)
+
+lambda_lasso_min2 <- cv_lasso_nw$lambda.min
+lambda_lasso_1se2 <- cv_lasso_nw$lambda.1se
+
+pred_lasso_min_nw <- predict(cv_lasso_nw, s = lambda_lasso_min2, newx = x_test2)
+
+cv_rmse_lasso_nw <- sqrt(min(cv_lasso_nw$cvm))
+rmse_lasso_nw <- rmse(y_test2, pred_lasso_min_nw)
+# coef(cv_lasso_nw, s = cv_lasso_nw$lambda.min)
+
+cv_rmse_lasso_nw
+rmse_lasso_nw
+```
+
+#### Bayesian
+
+##### Poisson 
+
+```{r}
+set.seed(8287)
+fit_naive_nw <- brm(monthly_deaths ~ month_f + offset(log(pop_interp)),
+            data = train2, family = poisson())
+
+fit_all_nw <- brm(monthly_deaths ~ month_f  + offset(log(pop_interp)) + monthly_mean_temp + high_temp + very_high_temp +
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip,
+            data = train2, family = poisson())
+
+fit_selected_poi_nw <- brm(monthly_deaths ~ month_f  + offset(log(pop_interp)) + very_high_avg_temp + very_high_precip,
+            data = train2, family = poisson())
+
+test2 <- test2 %>%
+  mutate(pred_mod_b_poi = fitted(fit_naive_nw, newdata = test2)[, "Estimate"])
+
+test2 <- test2 %>%
+  mutate(pred_mod_b_poi_all = fitted(fit_all_nw, newdata = test2)[, "Estimate"])
+
+test2 <- test2 %>%
+  mutate(pred_mod_b_poi_selected = fitted(fit_selected_poi_nw, newdata = test2)[, "Estimate"])
+
+rmse_mod_b_poi_nw <- rmse(test2$monthly_deaths, test2$pred_mod_b_poi)
+rmse_mod_b_poi_all_nw <- rmse(test2$monthly_deaths, test2$pred_mod_b_poi_all)
+rmse_mod_b_poi_selected_nw <- rmse(test2$monthly_deaths, test2$pred_mod_b_poi_selected)
+
+rmse_mod_b_poi_nw; rmse_mod_b_poi_all_nw; rmse_mod_b_poi_selected_nw
+```
+
+
+##### Negative Binomial
+
+```{r}
+set.seed(8287)
+fit_naive_nb_nw <- brm(monthly_deaths ~ month_f + offset(log(pop_interp)) ,
+            data = train2, family = negbinomial())
+
+fit_all_nb_nw <- brm(monthly_deaths ~ month_f  + offset(log(pop_interp)) + monthly_mean_temp + high_temp + very_high_temp +
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip,
+            data = train2, family = negbinomial())
+
+fit_selected_nb_nw <- brm(monthly_deaths ~ month_f  + offset(log(pop_interp)) + monthly_mean_avg_temp + very_high_avg_temp,
+            data = train2, family = negbinomial())
+
+test2 <- test2 %>%
+  mutate(pred_mod_b_nb = fitted(fit_naive_nb_nw, newdata = test2)[, "Estimate"])
+
+test2 <- test2 %>%
+  mutate(pred_mod_b_ng_all = fitted(fit_all_nb_nw, newdata = test2)[, "Estimate"])
+
+test2 <- test2 %>%
+  mutate(pred_mod_b_ng_selected = fitted(fit_selected_nb_nw, newdata = test2)[, "Estimate"])
+
+rmse_mod_b_nb_nw <- rmse(test2$monthly_deaths, test2$pred_mod_b_nb)
+rmse_mod_b_ng_all_nw <- rmse(test2$monthly_deaths, test2$pred_mod_b_ng_all)
+rmse_mod_b_ng_selected_nw <- rmse(test2$monthly_deaths, test2$pred_mod_b_ng_selected)
+
+rmse_mod_b_nb_nw;rmse_mod_b_ng_all_nw;rmse_mod_b_ng_selected_nw
+```
+
+```{r}
+rmse_tab_nw <- data.frame(
+  Model    = c("OLS_short", "OLS_full", "Lasso", "b_Poisson_naive", "b_NegBin_naive", "b_Poisson_all", "b_NegBin_all", "b_NegBin_selected", "b_Poisson_selected"),
+  CV_RMSE  = round(c(cv_rmse_mod1_nw, cv_rmse_mod6_nw, cv_rmse_lasso_nw, NA, NA, NA, NA, NA, NA), 2),
+  Test_RMSE = round(c(rmse_mod1_nw, rmse_mod6_nw, rmse_lasso_nw, rmse_mod_b_poi_nw, rmse_mod_b_nb_nw, rmse_mod_b_poi_all_nw,
+                      rmse_mod_b_ng_all_nw,rmse_mod_b_ng_selected_nw, rmse_mod_b_poi_selected_nw), 2)
+)
+
+kable(rmse_tab_nw, caption = "5-Fold CV and Test RMSEs")
+```
+
+## Pandemic
+
+### White 
+
+```{r}
+train <- dat_white %>% filter(year <= 1916)
+test_pandemic  <- dat_white %>% filter(ym >= as.Date("1918-02-01") & ym <= as.Date("1920-05-01"))
+
+xtest <- model.matrix(form, data = test_pandemic)[, -1]
+test_pandemic <- test_pandemic %>%
+  mutate(
+    pred_ols = predict(mod_1, newdata = test_pandemic, type="response"),
+    pred_ols_full = predict(mod_6, newdata = test_pandemic, type="response"), 
+    pred_lasso = as.numeric(predict(cv_lasso, s = lambda_lasso_min, newx = xtest)),
+    pred_mod_b_poi_naive = fitted(fit_naive, newdata = test_pandemic)[, "Estimate"],
+    pred_mod_b_poi_all = fitted(fit_all, newdata = test_pandemic)[, "Estimate"],
+    pred_mod_b_nb_naive = fitted(fit_naive_nb, newdata = test_pandemic)[, "Estimate"],
+    pred_mod_b_nb_all = fitted(fit_all_nb, newdata = test_pandemic)[, "Estimate"],
+    pred_mod_b_nb_selected = fitted(fit_selected_nb, newdata = test_pandemic)[, "Estimate"],
+    pred_mod_b_poi_selected = fitted(fit_selected_poi, newdata = test_pandemic)[, "Estimate"]
+    )
+
+```
+
+
+```{r}
+excess_df <- test_pandemic %>%
+  mutate(
+    excess_ols       = monthly_deaths - pred_ols,
+    excess_ols_full  = monthly_deaths - pred_ols_full,
+    excess_lasso     = monthly_deaths - pred_lasso,
+    excess_b_poisson_naive = monthly_deaths - pred_mod_b_poi_naive,
+    excess_b_NegBin_naive       = monthly_deaths - pred_mod_b_nb_naive,
+    excess_b_poisson       = monthly_deaths - pred_mod_b_poi_all,
+    excess_b_NegBin       = monthly_deaths - pred_mod_b_nb_all,
+    excess_b_NegBin_selected       = monthly_deaths - pred_mod_b_nb_selected,
+    excess_b_poisson_selected       = monthly_deaths - pred_mod_b_poi_selected
+  )
+
+total_excess <- summarise(excess_df,
+  OLS             = sum(excess_ols,      na.rm = TRUE),
+  OLS_full        = sum(excess_ols_full, na.rm = TRUE),
+  Lasso           = sum(excess_lasso,    na.rm = TRUE),
+  b_poisson_naive       = sum(excess_b_poisson_naive,      na.rm = TRUE),
+  b_NegBin_naive       = sum(excess_b_NegBin_naive,      na.rm = TRUE),  
+  b_poisson       = sum(excess_b_poisson,      na.rm = TRUE),
+  b_NegBin        = sum(excess_b_NegBin,      na.rm = TRUE),
+  b_NegBin_selected        = sum(excess_b_NegBin_selected,      na.rm = TRUE),
+  b_poisson_selected       = sum(excess_b_poisson_selected,      na.rm = TRUE)
+) %>% tidyr::pivot_longer(everything(), names_to="Model", values_to="Estimated_Total_Excess")
+
+kable(total_excess, caption = "Excess Mortality Estimates")%>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+
+```{r}
+set.seed(8287)
+
+# predict using Bayesian negative binomial model (naive model - month dummies and population offset only)
+epred_nb <- posterior_predict(fit_naive_nb, newdata = test_pandemic)
+
+
+total_excess_draw_nb <- apply(epred_nb, 1, function(mu) {
+  sum(test_pandemic$monthly_deaths - mu)
+})
+
+total_excess_mean_nb <- mean(total_excess_draw_nb)
+total_excess_ci_nb   <- quantile(total_excess_draw_nb, c(0.025, 0.975))
+
+c(
+  mean = total_excess_mean_nb,
+  lwr  = total_excess_ci_nb[1],
+  upr  = total_excess_ci_nb[2]
+)
+
+```
+
+Bayesian negative binomial model (naive: month dummies predictors only)
+
+Estimated total number of pandemic deaths (Whites): 2685.867 (1846.000, 3479.000)
+
+```{r}
+race_pandemic_pop <- death_month %>%
+  filter(ym >= as.Date("1918-03-01") & ym <= as.Date("1920-05-01")) %>%
+  group_by(race) %>%
+  summarise(
+    pop_sum = sum(pop_interp),
+    .groups = "drop"
+  )
+
+c(
+    rate_mean = total_excess_mean_nb / race_pandemic_pop$pop_sum[2] * 1e5,
+    rate_lwr  = total_excess_ci_nb[1]  / race_pandemic_pop$pop_sum[2] * 1e5,
+    rate_upr  = total_excess_ci_nb[2]  / race_pandemic_pop$pop_sum[2] * 1e5
+  )
+```
+
+Estimated rate of pandemic deaths (Whites): 20.669 (14.206, 26.772)
+
+### Non-White 
+
+```{r}
+train2 <- dat_nonwhite %>% filter(year <= 1916)
+test_pandemic2  <- dat_nonwhite %>% filter(ym >= as.Date("1918-02-01") & ym <= as.Date("1920-05-01"))
+
+xtest2 <- model.matrix(form, data = test_pandemic2)[, -1]
+test_pandemic2 <- test_pandemic2 %>%
+  mutate(
+    pred_ols = predict(mod_1_nw, newdata = test_pandemic2, type="response"),
+    pred_ols_full = predict(mod_6_nw, newdata = test_pandemic2, type="response"), ### mod_6 #### 
+    pred_lasso = as.numeric(predict(cv_lasso_nw, s = lambda_lasso_min2, newx = xtest2)), ### lasso ###
+    # pred_mod_b_poi_naive = predict(fit_naive_nw, newdata = test_pandemic2, re_formula = NA),
+    # pred_mod_b_nb_naive = predict(fit_naive_nb_nw, newdata = test_pandemic2, re_formula = NA),
+    # pred_mod_b_poi_all = predict(fit_all_nw, newdata = test_pandemic2, re_formula = NA),
+    # pred_mod_b_nb_all = predict(fit_all_nb_nw, newdata = test_pandemic2, re_formula = NA),
+    # pred_mod_b_nb_selected = predict(fit_selected_nb_nw, newdata = test_pandemic2, re_formula = NA),
+    # pred_mod_b_poi_selected = predict(fit_selected_poi_nw, newdata = test_pandemic2, re_formula = NA)
+    
+    pred_mod_b_poi_naive = fitted(fit_naive_nw, newdata = test_pandemic2)[, "Estimate"],
+    pred_mod_b_poi_all = fitted(fit_all_nw, newdata = test_pandemic2)[, "Estimate"],
+    pred_mod_b_nb_naive = fitted(fit_naive_nb_nw, newdata = test_pandemic2)[, "Estimate"],
+    pred_mod_b_nb_all = fitted(fit_all_nb_nw, newdata = test_pandemic2)[, "Estimate"],
+    pred_mod_b_nb_selected = fitted(fit_selected_nb_nw, newdata = test_pandemic2)[, "Estimate"],
+    pred_mod_b_poi_selected = fitted(fit_selected_poi_nw, newdata = test_pandemic2)[, "Estimate"]
+    )
+
+```
+
+
+```{r}
+excess_df2 <- test_pandemic2 %>%
+  mutate(
+    excess_ols       = monthly_deaths - pred_ols,
+    excess_ols_full  = monthly_deaths - pred_ols_full,
+    excess_lasso     = monthly_deaths - pred_lasso,
+    excess_b_poisson_naive = monthly_deaths - pred_mod_b_poi_naive,
+    excess_b_NegBin_naive       = monthly_deaths - pred_mod_b_nb_naive,
+    excess_b_poisson       = monthly_deaths - pred_mod_b_poi_all,
+    excess_b_NegBin       = monthly_deaths - pred_mod_b_nb_all,
+    excess_b_NegBin_selected       = monthly_deaths - pred_mod_b_nb_selected,
+    excess_b_poisson_selected       = monthly_deaths - pred_mod_b_poi_selected
+  )
+
+total_excess2 <- summarise(excess_df2,
+  OLS             = sum(excess_ols,      na.rm = TRUE),
+  OLS_full        = sum(excess_ols_full, na.rm = TRUE),
+  Lasso           = sum(excess_lasso,    na.rm = TRUE),
+  b_poisson_naive       = sum(excess_b_poisson_naive,      na.rm = TRUE),
+  b_NegBin_naive       = sum(excess_b_NegBin_naive,      na.rm = TRUE),  
+  b_poisson       = sum(excess_b_poisson,      na.rm = TRUE),
+  b_NegBin        = sum(excess_b_NegBin,      na.rm = TRUE),
+  b_NegBin_selected        = sum(excess_b_NegBin_selected,      na.rm = TRUE),
+  b_poisson_selected       = sum(excess_b_poisson_selected,      na.rm = TRUE)
+) %>% tidyr::pivot_longer(everything(), names_to="Model", values_to="Estimated_Total_Excess")
+
+kable(total_excess2, caption = "Excess Mortality Estimates for Non-Whites")%>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+
+```{r}
+set.seed(8287)
+
+# predict using Bayesian negative binomial model (all predictors)
+epred_nb_nw <- posterior_predict(fit_all_nb_nw, newdata = test_pandemic2)
+
+
+total_excess_draw_nb_nw <- apply(epred_nb_nw, 1, function(mu) {
+  sum(test_pandemic2$monthly_deaths - mu)
+})
+
+total_excess_mean_nb_nw <- mean(total_excess_draw_nb_nw)
+total_excess_ci_nb_nw   <- quantile(total_excess_draw_nb_nw, c(0.025, 0.975))
+
+c(
+  mean_nw = total_excess_mean_nb_nw,
+  lwr_nw  = total_excess_ci_nb_nw[1],
+  upr_nw  = total_excess_ci_nb_nw[2]
+)
+
+```
+
+Bayesian negative binomial model (all predictors)
+
+Estimated total number of pandemic deaths (Non-Whites): 773.290 (94.950, 1303.025)
+
+```{r}
+c(
+    rate_mean = total_excess_mean_nb_nw / race_pandemic_pop$pop_sum[1] * 1e5,
+    rate_lwr  = total_excess_ci_nb_nw[1]  / race_pandemic_pop$pop_sum[1] * 1e5,
+    rate_upr  = total_excess_ci_nb_nw[2]  / race_pandemic_pop$pop_sum[1] * 1e5
+  )
+```
+
+Estimated rate of pandemic deaths (Non-Whites): 24.915 (3.059, 41.983)
+
+```{r}
+# export data
+# rmse_tab_race <- data.frame(Model = rmse_tab$Model,
+#                             CV_RMSE_w = rmse_tab$CV_RMSE,
+#                             Test_RMSE_w = rmse_tab$Test_RMSE,
+#                             CV_RMSE_nw = rmse_tab_nw$CV_RMSE,
+#                             Test_RMSE_nw = rmse_tab_nw$Test_RMS)
+# 
+# 
+# total_excess_race <- data.frame(Model = total_excess$Model,
+#                                 Estimated_Total_Excess_w = total_excess$Estimated_Total_Excess,
+#                                 Estimated_Total_Excess_nw = total_excess2$Estimated_Total_Excess)
+
+# write.csv(rmse_tab_race, file = 'MD_race_model_eval.csv', row.names = FALSE)
+# 
+# write.csv(total_excess_race, file = 'MD_race_excess.csv', row.names = FALSE)
+```
+
