@@ -1,0 +1,16 @@
+"Model","CV_RMSE","Test_RMSE"
+"OLS_short",202.65,267.13
+"OLS_full",274.08,253.79
+"Ridge",220.93,312.63
+"Lasso",229.13,299.68
+"Poisson",251.51,256.74
+"NegBin",249.67,258.1
+"CART",353,272.84
+"RF",332.51,288.49
+"XGBoost",210.24,352.81
+"b_Poisson_naive",NA,247.09
+"b_NegBin_naive",NA,244.98
+"b_Poisson_all",NA,255.84
+"b_NegBin_all",NA,254.18
+"b_NegBin_selected",NA,295.87
+"b_Poisson_selected",NA,188149.15

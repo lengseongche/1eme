@@ -1,0 +1,10 @@
+"Model","CV_RMSE","Test_RMSE"
+"OLS_short",26.02,32.21
+"OLS_full",25.01,31.48
+"Lasso",26.02,30.77
+"b_Poisson_naive",NA,28.54
+"b_NegBin_naive",NA,61.82
+"b_Poisson_all",NA,43.79
+"b_NegBin_all",NA,30.94
+"b_NegBin_selected",NA,31.32
+"b_Poisson_selected",NA,30.75
