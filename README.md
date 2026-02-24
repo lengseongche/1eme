@@ -32,6 +32,10 @@ To replicate the results, follow the steps outlined below:
 
 `Estimand6_MD.Rmd` - Estimate the total number and rate of pandemic deaths in rural Maryland by binary race (White vs.\ Non-White)
 
+## Output
+
+`1EME estimates.xlsx` - includes multiple spreadsheets reporting the final estimated pandemic deaths and corresponding rates for each estimand
+
 ## Authors
 
 - Leng Seong Che
