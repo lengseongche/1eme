@@ -1,0 +1,752 @@
+---
+title: "KY_Analysis"
+author: "Leng Seong Che & Casey F. Breen"
+date: "2026-01-14"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(here)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(MASS) 
+library(lubridate)
+library(caret)
+library(splines)
+library(glmnet)
+library(tidyr)
+library(kableExtra)
+library(brms)
+```
+
+```{r}
+KY_aggregate_month_cause <- read_csv(here("data", "Mortality data", "Aggregate cause-specific files", "KY_aggregate_month-cause - v1.csv"))
+
+KY_pop <- read_csv(here("data", "Denominator data", "Census counts", "KY_population - v1.csv"))
+KY_soldiers <- read_csv(here("data", "Denominator data", "Drafted soldier counts", "KY_soldiers - v1.csv"))
+```
+
+# Total Monthly Deaths
+```{r}
+death_month <- KY_aggregate_month_cause %>%
+  mutate(year = as.integer(year),
+         month = as.integer(month),
+         ym = as.Date(sprintf("%04d-%02d-01", year, month))) %>%
+  group_by(ym) %>%
+  summarise(monthly_deaths = sum(deaths, na.rm = TRUE), .groups = "drop")
+
+pandemic_start <- as.Date("1918-03-01")
+pandemic_end   <- as.Date("1920-05-01")
+
+ggplot(death_month, aes(x = ym, y = monthly_deaths)) +
+  geom_rect(
+    data = data.frame(xmin = pandemic_start, xmax = pandemic_end, ymin = -Inf, ymax = Inf),
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+    fill = "orange", alpha = 0.12, inherit.aes = FALSE
+  ) +
+  geom_col(fill = "grey80") +
+  geom_line(color = "darkblue", size = 0.8) +
+  geom_smooth(method = "loess", span = 0.2, color = "red", se = FALSE) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(x = "Month", y = "Number of deaths", title = "All-Cause Death Counts per month (All-Year)") +
+  theme_minimal()
+```
+
+# Weather 
+
+## Humidity
+
+```{r}
+KY_weather <- read_csv(here("data", "Weather data", "KY_weather - v1.csv"))
+```
+
+```{r}
+precip_month <- KY_weather %>%
+  mutate(ym = as.Date(sprintf("%04d-%02d-01", year, month))) %>%
+  group_by(ym) %>%
+  summarise(precip = mean(precipitation1, na.rm = TRUE), .groups = "drop")
+
+precip_month <- death_month %>% 
+  mutate(year = year(ym), month = month(ym))%>% 
+  left_join(precip_month, by = "ym")
+
+precip_month <- precip_month %>%                    
+  group_by(month) %>%
+  mutate(
+    mean_precip_month = mean(precip, na.rm = TRUE),
+    sd_precip_month   = sd(precip,   na.rm = TRUE),
+    high_precip = ifelse(precip > mean_precip_month, 1, 0),
+    very_high_precip = ifelse(precip > mean_precip_month + sd_precip_month, 1, 0)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+scale_factor <- max(precip_month$monthly_deaths, na.rm = TRUE) / max(precip_month$precip, na.rm = TRUE)
+
+ggplot(precip_month, aes(x = ym)) +
+  geom_rect(
+    data = data.frame(xmin = pandemic_start, xmax = pandemic_end, ymin = -Inf, ymax = Inf),
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+    fill = "orange", alpha = 0.12, inherit.aes = FALSE
+  ) +  
+  geom_col(aes(y = monthly_deaths), fill = "grey80", width = 25) +
+  geom_line(aes(y = precip * scale_factor), color = "dodgerblue", size = 0.9) +
+  scale_y_continuous(name = "Monthly deaths",
+                     sec.axis = sec_axis(~ . / scale_factor, name = "Precipitation (mm)")) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(title = "Monthly deaths and precipitation in Kentucky (all-year)") +
+  theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#summary(lm(monthly_deaths ~ high_precip, data = precip_month))
+```
+
+## Temperature
+
+```{r}
+temp_month <- KY_weather %>%
+  mutate(ym = as.Date(sprintf("%04d-%02d-01", year, month))) %>%
+  group_by(ym) %>%
+  summarise(monthly_mean_temp = mean(temperature1, na.rm = TRUE), 
+            monthly_mean_avg_temp = mean(temperature2, na.rm = TRUE),
+            .groups = "drop")
+
+temp_month <- death_month %>% 
+  mutate(year = year(ym), month = month(ym))%>% 
+  left_join(temp_month, by = "ym")
+
+temp_month <- temp_month %>%                    
+  group_by(month) %>%
+  mutate(
+    mean_temp_month = mean(monthly_mean_temp, na.rm = TRUE),
+    mean_avg_temp_month = mean(monthly_mean_avg_temp, na.rm = TRUE),
+    sd_temp_month   = sd(monthly_mean_temp,   na.rm = TRUE),
+    sd_avg_temp_month = sd(monthly_mean_avg_temp, na.rm = TRUE),
+    high_temp = ifelse(monthly_mean_temp > mean_temp_month, 1, 0),
+    very_high_temp = ifelse(monthly_mean_temp > mean_temp_month + sd_temp_month, 1, 0),
+    high_avg_temp = ifelse(monthly_mean_avg_temp > mean_avg_temp_month, 1, 0),
+    very_high_avg_temp = ifelse(monthly_mean_avg_temp > mean_avg_temp_month + sd_avg_temp_month, 1, 0)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+scale_factor_temp <- max(temp_month$monthly_deaths, na.rm = TRUE) / max(temp_month$monthly_mean_temp, na.rm = TRUE)
+
+
+ggplot(temp_month, aes(x = ym)) +
+  geom_rect(
+    data = data.frame(xmin = pandemic_start, xmax = pandemic_end, ymin = -Inf, ymax = Inf),
+    aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+    fill = "orange", alpha = 0.12, inherit.aes = FALSE
+  ) +
+  geom_col(aes(y = monthly_deaths), fill = "grey80", width = 25) +
+  geom_line(aes(y = monthly_mean_temp * scale_factor_temp), color = "dodgerblue", size = 0.9) +
+#  geom_smooth(aes(y = monthly_deaths), method = "loess", formula = y ~ x, se = FALSE, color = "black", size = 0.8) +
+  scale_y_continuous(name = "Monthly deaths",
+                     sec.axis = sec_axis(~ . / scale_factor_temp, name = "Temperature")) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(title = "Monthly Deaths and Temperature in Kentucky (all-year)") +
+  theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#summary(lm(monthly_deaths ~ very_high_temp ,data = temp_month))
+```
+
+# CDR
+
+```{r}
+KY_pop_year <- KY_pop %>%
+  group_by(year) %>%
+  summarise(pop = sum(population, na.rm=TRUE), .groups = "drop")
+
+decimal_year <- function(d) { d <- as.Date(d); year(d) + (month(d) - 0.5)/12 }
+
+total_draftees <- KY_soldiers %>%
+  summarise(n = sum(draftees_accepted, na.rm = TRUE)) %>%
+  pull(n)
+
+baseline_start <- as.Date("1914-01-01")
+baseline_end   <- as.Date("1918-02-01")
+
+pandemic_start <- as.Date("1918-03-01")
+pandemic_end   <- as.Date("1920-05-01")
+
+baseline_months <- seq(baseline_start, baseline_end, by = "month")
+baseline_dec    <- decimal_year(baseline_months)
+pandemic_months <- seq(pandemic_start, pandemic_end, by = "month")
+pandemic_dec    <- decimal_year(pandemic_months)
+
+census_years <- KY_pop_year$year
+census_pops  <- KY_pop_year$pop
+```
+
+```{r}
+#### pop exponential growth #### 
+all_months <- death_month %>%
+  mutate(dec_yr = decimal_year(ym),
+         log_pop_interp = approx(x = census_years,
+                            y = log(census_pops),
+                            xout = dec_yr,
+                            rule = 2)$y,
+         pop_interp = exp(log_pop_interp))
+
+all_months <- all_months %>%
+  mutate(
+    pop_adj = case_when(
+      ym >= as.Date("1917-06-01") & ym <= as.Date("1919-09-01") ~ pmax(pop_interp - total_draftees, 0),
+      TRUE ~ pop_interp
+    )
+  )
+
+monthly_rates <- all_months %>%
+  mutate(
+    # Crude death rate per 100,000 person-months
+    cdr_month_per_100k = 1e5 * monthly_deaths / pop_adj
+  ) %>%
+  dplyr::select(ym, monthly_deaths, pop_interp, pop_adj, cdr_month_per_100k)
+
+yearly_rates <- monthly_rates %>%
+  mutate(year = year(ym)) %>%
+  group_by(year) %>%
+  summarise(
+    deaths_year  = sum(monthly_deaths, na.rm = TRUE),
+    pop_year_avg = mean(pop_adj, na.rm = TRUE),
+    # Crude death rate per 100,000 person-years
+    cdr_year_per_100k = 1e5 * deaths_year / pop_year_avg,
+    .groups = "drop"
+  )
+
+## plot montly crude death rates
+ggplot(
+  monthly_rates,
+  aes(x = ym, y = cdr_month_per_100k)
+) +
+  geom_line(linewidth = 0.6) +
+  geom_vline(xintercept = as.Date(c("1918-03-01","1920-05-01")),
+             linetype = "dashed", alpha = 0.4) +
+  labs(
+    title = "Monthly Crude Death Rate in Rural Maryland",
+    x = NULL, 
+    y = "Deaths per 100,000 person-months",
+  ) +
+  scale_x_date(
+    date_breaks = "2 years",       
+    date_labels = "%Y",           
+    expand = c(0.01, 0.01)
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+
+
+## plot yearly crude death rates
+ggplot(
+  yearly_rates %>% filter(!is.na(cdr_year_per_100k)),
+  aes(x = year, y = cdr_year_per_100k)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.6) +
+  labs(
+    title = "Yearly Crude Death Rate in Rural Maryland",
+    x = "Year",
+    y = "Deaths per 100,000 person-years",
+  ) +
+  scale_x_continuous(
+    breaks = seq(min(yearly_rates$year, na.rm = TRUE),
+                 max(yearly_rates$year, na.rm = TRUE),
+                 by = 1), 
+    minor_breaks = NULL,
+    expand = c(0.01, 0.01)
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor.x = element_blank()
+  )
+```
+
+
+# Modeling
+
+```{r}
+month_tab <- precip_month %>%
+  left_join(
+    temp_month %>%
+      dplyr::select(-"ym",-"monthly_deaths" ),
+    by = c("year", "month"))%>%
+  mutate(month_f = factor(month, levels = 1:12, labels = month.abb))
+
+month_tab <- month_tab %>%
+  left_join(
+    monthly_rates %>%
+      dplyr::select(-"monthly_deaths" ),
+    by = "ym") %>%
+  mutate(pop = log(pop_adj))
+```
+
+## pre pandemic
+
+### OLS
+
+```{r}
+train <- month_tab %>% filter(year <= 1916)
+test  <- month_tab %>% filter(ym >= as.Date("1917-01-01") & ym <= as.Date("1918-02-01"))
+
+#### OLS ####
+mod_1 <- lm( monthly_deaths ~ month_f , data = train)
+mod_2 <- lm( monthly_deaths ~ month_f + pop, data = train)
+mod_3 <- lm( monthly_deaths ~ month_f + pop + high_temp , data = train)
+mod_4 <- lm( monthly_deaths ~ month_f + pop + high_temp + high_precip, data = train)
+mod_5 <- lm( monthly_deaths ~ month_f + pop + high_temp * high_precip , data = train)
+mod_6 <- lm( monthly_deaths ~  month_f + pop + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip, data = train)
+
+####### RMSE #######
+test <- test %>%
+  mutate(pred_mod1 = predict(mod_1, newdata = test, type="response"))
+
+test <- test %>%
+  mutate(pred_mod2 = predict(mod_2, newdata = test), type="response")
+
+test <- test %>%
+  mutate(pred_mod3 = predict(mod_3, newdata = test, type="response"))
+
+test <- test %>%
+  mutate(pred_mod4 = predict(mod_4, newdata = test, type="response"))
+
+test <- test %>%
+  mutate(pred_mod5 = predict(mod_5, newdata = test, type="response"))
+
+test <- test %>%
+  mutate(pred_mod6 = predict(mod_6, newdata = test, type="response"))
+
+rmse <- function(y, yhat) sqrt(mean((y - yhat)^2, na.rm = TRUE))
+
+rmse_mod1 <- rmse(test$monthly_deaths, test$pred_mod1)
+rmse_mod2 <- rmse(test$monthly_deaths, test$pred_mod2)
+rmse_mod3 <- rmse(test$monthly_deaths, test$pred_mod3)
+rmse_mod4 <- rmse(test$monthly_deaths, test$pred_mod4)
+rmse_mod5 <- rmse(test$monthly_deaths, test$pred_mod5)
+rmse_mod6 <- rmse(test$monthly_deaths, test$pred_mod6)
+
+rmse_mod1;rmse_mod2;rmse_mod3;rmse_mod4;rmse_mod5;rmse_mod6
+```
+
+
+```{r}
+###### CV ###
+set.seed(8287)
+cv_5fold <- trainControl(method = "cv", number = 5)
+
+cv_rmse_mod1 <- train(monthly_deaths ~ month_f , data = train, method = "lm", trControl = cv_5fold)$results$RMSE
+cv_rmse_mod2 <- train(monthly_deaths ~ month_f + pop , data = train, method = "lm", trControl = cv_5fold)$results$RMSE
+cv_rmse_mod3 <- train(monthly_deaths ~ month_f + pop + high_temp , data = train, method = "lm", trControl = cv_5fold)$results$RMSE
+cv_rmse_mod4 <- train(monthly_deaths ~ month_f + pop + high_temp + high_precip , data = train, method = "lm", trControl = cv_5fold)$results$RMSE 
+cv_rmse_mod5 <- train(monthly_deaths ~ month_f + pop + high_temp * high_precip , data = train, method = "lm", trControl = cv_5fold)$results$RMSE 
+cv_rmse_mod6 <- train(monthly_deaths ~ month_f + pop + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip, 
+      data = train, method = "lm", trControl = cv_5fold)$results$RMSE
+
+cv_rmse_mod1;cv_rmse_mod2;cv_rmse_mod3;cv_rmse_mod4;cv_rmse_mod5;cv_rmse_mod6
+
+```
+
+### Ridge
+
+```{r}
+set.seed(8287)
+form <- monthly_deaths ~ month_f + pop +
+  monthly_mean_temp + high_temp + very_high_temp +
+  monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp +
+  precip + high_precip + very_high_precip
+
+x_train <- model.matrix(form, data = train)[, -1]
+y_train <- train$monthly_deaths
+
+x_test  <- model.matrix(form, data = test)[, -1]
+y_test  <- test$monthly_deaths
+
+cv_ridge <- cv.glmnet(x_train, y_train, alpha = 0, family = "gaussian", nfolds = 5)
+
+lambda_ridge_min <- cv_ridge$lambda.min
+lambda_ridge_1se <- cv_ridge$lambda.1se
+
+pred_ridge_min <- predict(cv_ridge, s = lambda_ridge_min, newx = x_test)
+
+cv_rmse_ridge <- sqrt(min(cv_ridge$cvm))
+rmse_ridge <- rmse(y_test, pred_ridge_min)
+
+cv_rmse_ridge;rmse_ridge
+```
+
+### LASSO
+
+```{r}
+set.seed(8287)
+
+cv_lasso <- cv.glmnet(x_train, y_train, alpha = 1, family = "gaussian", nfolds = 5)
+
+lambda_lasso_min <- cv_lasso$lambda.min
+lambda_lasso_1se <- cv_lasso$lambda.1se
+
+pred_lasso_min <- predict(cv_lasso, s = lambda_lasso_min, newx = x_test)
+
+cv_rmse_lasso <- sqrt(min(cv_lasso$cvm))
+rmse_lasso <- rmse(y_test, pred_lasso_min)
+
+coef(cv_lasso, s = cv_lasso$lambda.min)
+
+cv_rmse_lasso;rmse_lasso
+```
+
+### Decision Tree
+
+```{r}
+###### decision tree #####
+library(rpart)
+library(rpart.plot)
+
+set.seed(8287)
+mod_8 <- rpart(form, data = train,
+               method = "anova",
+               control = rpart.control(cp = 0.01,        
+                                       minbucket = 5,   
+                                       maxdepth  = 6))   
+
+rpart.plot(mod_8, type = 2, extra = 101)
+pred_mod8 <- predict(mod_8, newdata = test)
+
+rmse_mod8 <- rmse(test$monthly_deaths, pred_mod8)
+rmse_mod8
+
+tree_cv <- train(form, data = train, method = "rpart", trControl = cv_5fold, tuneLength = 10, metric = "RMSE")
+pred_tree <- predict(tree_cv, newdata = test)
+cv_rmse_mod8 <- rmse(test$monthly_deaths, pred_tree)
+cv_rmse_mod8
+```
+
+### Random Forest
+
+```{r}
+#### random forest ##### 
+set.seed(8287)
+rf_fit <- train(
+  form, data = train,
+  method = "ranger",                
+  trControl = cv_5fold,
+  tuneLength = 10,                
+  metric = "RMSE",
+  importance = "permutation",
+  num.trees = 1000,             
+  respect.unordered.factors = "order"
+)
+
+rf_fit$bestTune
+pred_rf_mod <- predict(rf_fit, newdata = test)
+cv_rmse_rf <- rmse(test$monthly_deaths, pred_rf_mod)
+cv_rmse_rf
+
+library(ranger)
+set.seed(8287)
+rf <- ranger(
+  form, data = train,
+  num.trees = 1000,
+  mtry = 11, 
+  min.node.size = 5,
+  importance = "permutation",
+  respect.unordered.factors = "order"
+)
+
+pred_rf <- predict(rf, data = test)$predictions
+rmse_rf <- rmse(test$monthly_deaths, pred_rf)
+rmse_rf
+```
+
+### XGBoost tree
+
+```{r}
+### XGBoost tree
+set.seed(8287)
+grid_xgb <- expand.grid(
+  nrounds = c(200, 400, 800),    
+  max_depth = c(2, 3, 4),         
+  eta = c(0.05, 0.1),              
+  gamma = 0,                      
+  colsample_bytree = c(0.7, 1.0), 
+  min_child_weight = c(1, 3),
+  subsample = c(0.8, 1.0)
+)
+
+xgb_fit <- train(
+  form, data = train,
+  method = "xgbTree",
+  trControl = cv_5fold, tuneGrid = grid_xgb,
+  metric = "RMSE", verbose = FALSE
+)
+
+
+xgb_fit$bestTune
+cv_rmse_xgb <- min(xgb_fit$results$RMSE)
+
+pred_xgb <- predict(xgb_fit, newdata = test)
+
+rmse_xgb <- rmse(test$monthly_deaths, pred_xgb)
+rmse_xgb
+```
+
+### Poisson 
+
+```{r}
+set.seed(8287)
+mod_poisson <- glm(monthly_deaths ~ month_f + pop + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip, family = poisson(), 
+              data = train, offset = pop)
+
+pois_cv <-train(monthly_deaths ~ month_f + pop + monthly_mean_temp + high_temp + very_high_temp +
+  monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp +
+  precip + high_precip + very_high_precip + offset(pop) , data = train, method = "glm",family = poisson(), trControl = cv_5fold)
+
+cv_rmse_pois <- pois_cv$results$RMSE
+
+test <- test %>%
+  mutate(pred_poisson = predict(mod_poisson, newdata = test, type = "response"))
+
+rmse_mod_poisson <- rmse(test$monthly_deaths, test$pred_poisson)
+
+cv_rmse_pois;rmse_mod_poisson
+```
+
+###  Negative Binomial
+
+```{r}
+set.seed(8287)
+mod_nb <- glm.nb(monthly_deaths ~  month_f + pop + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip + offset(pop), data = train)
+
+nb_cv <- train(monthly_deaths ~ month_f +pop + monthly_mean_temp + high_temp + very_high_temp +
+  monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp +
+  precip + high_precip + very_high_precip + offset(pop) , data = train, method = "glm.nb", trControl = cv_5fold)
+
+cv_rmse_nb <- nb_cv$results$RMSE[nb_cv$results$link == "log"]
+
+test <- test %>%
+  mutate(pred_nb = predict(mod_nb, newdata = test, type = "response"))
+
+rmse_mod_nb <- rmse(test$monthly_deaths, test$pred_nb)
+
+cv_rmse_nb;rmse_mod_nb
+```
+
+### Bayesian
+
+#### Poisson 
+
+```{r}
+set.seed(8287)
+fit_naive <- brm(monthly_deaths ~ month_f + offset(pop),
+             data = train, family = poisson(), seed = 8287)
+
+fit_all <- brm(monthly_deaths ~ month_f + offset(pop) +pop + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip,
+            data = train, family = poisson(), seed = 8287)
+
+fit_selected_poi <- brm(monthly_deaths ~ month_f + offset(pop) + pop + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + very_high_avg_temp + precip + high_precip,
+            data = train, family = poisson(), seed = 8287)
+
+test <- test %>%
+  mutate(pred_mod_b_poi_naive = fitted(fit_naive, newdata = test)[, "Estimate"])
+
+test <- test %>%
+  mutate(pred_mod_b_poi_all = fitted(fit_all, newdata = test)[, "Estimate"])
+
+test <- test %>%
+  mutate(pred_mod_b_poi_selected = fitted(fit_selected_poi, newdata = test)[, "Estimate"])
+
+rmse_mod_b_poi_naive <- rmse(test$monthly_deaths, test$pred_mod_b_poi_naive)
+rmse_mod_b_poi_all <- rmse(test$monthly_deaths, test$pred_mod_b_poi_all)
+rmse_mod_b_poi_selected <- rmse(test$monthly_deaths, test$pred_mod_b_poi_selected)
+
+rmse_mod_b_poi_naive; rmse_mod_b_poi_all;rmse_mod_b_poi_selected
+
+```
+
+#### Negative Binomial
+
+```{r}
+set.seed(8287)
+fit_nb_naive <- brm(monthly_deaths ~ month_f + offset(pop),
+             data = train, family = negbinomial(), seed = 8287)
+
+fit_all_nb <- brm(monthly_deaths ~ month_f + offset(pop) + pop + monthly_mean_temp + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + high_avg_temp + very_high_avg_temp + precip + high_precip + very_high_precip,
+            data = train, family = negbinomial(), seed = 8287)
+
+fit_selected_nb <- brm(monthly_deaths ~ month_f + offset(pop) + pop + high_temp + very_high_temp + 
+              monthly_mean_avg_temp + very_high_avg_temp + precip + high_precip,
+            data = train, family = negbinomial(), seed = 8287)
+
+
+test <- test %>%
+   mutate(pred_mod_b_poi_naive = fitted(fit_nb_naive, newdata = test)[, "Estimate"])
+
+test <- test %>%
+  mutate(pred_mod_b_ng_all = fitted(fit_all_nb, newdata = test)[, "Estimate"])
+
+test <- test %>%
+  mutate(pred_mod_b_ng_selected = fitted(fit_selected_nb, newdata = test)[, "Estimate"])
+
+rmse_mod_b_ng_naive <- rmse(test$monthly_deaths, test$pred_mod_b_poi_naive)
+rmse_mod_b_ng_all <- rmse(test$monthly_deaths, test$pred_mod_b_ng_all)
+rmse_mod_b_ng_selected <- rmse(test$monthly_deaths, test$pred_mod_b_ng_selected)
+rmse_mod_b_ng_naive; rmse_mod_b_ng_all;rmse_mod_b_ng_selected
+```
+
+
+```{r}
+rmse_tab <- data.frame(
+  Model    = c("OLS_short", "OLS_full", "Ridge", "Lasso", "Poisson",
+               "NegBin", "CART", "RF", "XGBoost", "b_Poisson_naive", "b_NegBin_naive","b_Poisson_all", 
+               "b_NegBin_all", "b_NegBin_selected", "b_Poisson_selected"),
+  CV_RMSE  = round(c(cv_rmse_mod1, cv_rmse_mod6, cv_rmse_ridge, cv_rmse_lasso,
+                     cv_rmse_pois, cv_rmse_nb, cv_rmse_mod8, cv_rmse_rf,
+                     cv_rmse_xgb, NA, NA, NA, NA, NA, NA), 2),
+  Test_RMSE = round(c(rmse_mod1, rmse_mod6, rmse_ridge, rmse_lasso,
+                      rmse_mod_poisson, rmse_mod_nb, rmse_mod8,
+                      rmse_rf, rmse_xgb, rmse_mod_b_poi_naive, rmse_mod_b_ng_naive, rmse_mod_b_poi_all,
+                      rmse_mod_b_ng_all,rmse_mod_b_ng_selected, rmse_mod_b_poi_selected), 2)
+)
+
+kable(rmse_tab, caption = "5-Fold CV and Test RMSEs")
+```
+
+
+## Pandemic
+
+```{r}
+train <- month_tab %>% filter(year <= 1916)
+test_pandemic  <- month_tab %>% filter(ym >= as.Date("1918-03-01") & ym <= as.Date("1920-05-01"))
+
+xtest <- model.matrix(form, data = test_pandemic)[, -1]
+test_pandemic <- test_pandemic %>%
+  mutate(
+    pred_ols = predict(mod_1, newdata = test_pandemic, type="response"),
+    pred_ols_full = predict(mod_6, newdata = test_pandemic, type="response"), 
+    pred_ridge = as.numeric(predict(cv_ridge, s = lambda_ridge_min, newx = xtest)), 
+    pred_lasso = as.numeric(predict(cv_lasso, s = lambda_ridge_min, newx = xtest)),
+    pred_poisson = predict(mod_poisson, newdata = test_pandemic, type = "response"), 
+    pred_nb = predict(mod_nb, newdata = test_pandemic, type = "response"), 
+    pred_rpart = predict(mod_8, newdata = test_pandemic), 
+    pred_rf = as.numeric(predict(rf, data = test_pandemic)$predictions), 
+    pred_xgb = predict(xgb_fit, newdata = test_pandemic),
+    pred_mod_b_poi_naive = fitted(fit_naive, newdata = test_pandemic)[, "Estimate"],
+    pred_mod_b_nb_naive = fitted(fit_nb_naive, newdata = test_pandemic)[, "Estimate"],
+    pred_mod_b_poi_all = fitted(fit_all, newdata = test_pandemic)[, "Estimate"],
+    pred_mod_b_nb_all = fitted(fit_all_nb, newdata = test_pandemic)[, "Estimate"],
+    pred_mod_b_nb_selected = fitted(fit_selected_nb, newdata = test_pandemic)[, "Estimate"],
+    pred_mod_b_poi_selected = fitted(fit_selected_poi, newdata = test_pandemic)[, "Estimate"],
+    )
+```
+
+
+```{r}
+excess_df <- test_pandemic %>%
+  mutate(
+    excess_ols       = monthly_deaths - pred_ols,
+    excess_ols_full  = monthly_deaths - pred_ols_full,
+    excess_ridge     = monthly_deaths - pred_ridge,
+    excess_lasso     = monthly_deaths - pred_lasso,
+    excess_poisson   = monthly_deaths - pred_poisson,
+    excess_nb        = monthly_deaths - pred_nb,
+    excess_rpart     = monthly_deaths - pred_rpart,
+    excess_rf        = monthly_deaths - pred_rf,
+    excess_xgb       = monthly_deaths - pred_xgb,
+    excess_b_poisson_naive       = monthly_deaths - pred_mod_b_poi_naive,
+    excess_b_NegBin_naive       = monthly_deaths - pred_mod_b_nb_naive,
+    excess_b_poisson_all       = monthly_deaths - pred_mod_b_poi_all,
+    excess_b_NegBin_all       = monthly_deaths - pred_mod_b_nb_all,
+    excess_b_NegBin_selected       = monthly_deaths - pred_mod_b_nb_selected,
+    excess_b_poisson_selected       = monthly_deaths - pred_mod_b_poi_selected
+  )
+
+total_excess <- summarise(excess_df,
+  OLS             = sum(excess_ols,      na.rm = TRUE),
+  OLS_full        = sum(excess_ols_full, na.rm = TRUE),
+  Ridge           = sum(excess_ridge,    na.rm = TRUE),
+  Lasso           = sum(excess_lasso,    na.rm = TRUE),
+  Poisson         = sum(excess_poisson,  na.rm = TRUE),
+  NegBin          = sum(excess_nb,       na.rm = TRUE),
+  CART            = sum(excess_rpart,    na.rm = TRUE),
+  RF              = sum(excess_rf,       na.rm = TRUE),
+  XGBoost         = sum(excess_xgb,      na.rm = TRUE),
+  b_poisson_naive       = sum(excess_b_poisson_naive,      na.rm = TRUE),
+  b_NegBin_naive        = sum(excess_b_NegBin_naive,      na.rm = TRUE),
+  b_poisson_all       = sum(excess_b_poisson_all,      na.rm = TRUE),
+  b_NegBin_all        = sum(excess_b_NegBin_all,      na.rm = TRUE),
+  b_NegBin_selected        = sum(excess_b_NegBin_selected,      na.rm = TRUE),
+  b_poisson_selected       = sum(excess_b_poisson_selected,      na.rm = TRUE)
+) %>% tidyr::pivot_longer(everything(), names_to="Model", values_to="Estimated_Total_Excess")
+
+kable(total_excess, caption = "Excess Mortality Estimates")%>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+```{r}
+set.seed(8287)
+
+# predict using Bayesian negative binomial model (naive - month dummies and population offset only)
+
+epred_nb <- posterior_predict(fit_nb_naive, newdata = test_pandemic)
+
+total_excess_draw_nb <- apply(epred_nb, 1, function(mu) {
+  sum(test_pandemic$monthly_deaths - mu)
+})
+
+total_excess_mean_nb <- mean(total_excess_draw_nb)
+total_excess_ci_nb   <- quantile(total_excess_draw_nb, c(0.025, 0.975))
+
+c(
+  mean = total_excess_mean_nb,
+  lwr  = total_excess_ci_nb[1],
+  upr  = total_excess_ci_nb[2]
+)
+
+```
+
+Bayesian negative binomial model (naive: month dummies predictors only)
+
+9986.339 (7541.450, 12362.075)
+
+```{r}
+pandemic_pop <- all_months %>%
+  filter(ym >= as.Date("1918-03-01") & ym <= as.Date("1920-05-01")) %>%
+  summarise(
+    pop_sum = sum(pop_adj)
+  )%>%
+  pull()
+
+c(
+    rate_mean = total_excess_mean_nb / pandemic_pop * 1e5,
+    rate_lwr  = total_excess_ci_nb[1]  / pandemic_pop * 1e5,
+    rate_upr  = total_excess_ci_nb[2]  / pandemic_pop * 1e5
+  )
+```
+
+Estimated rate of pandemic deaths: 15.621 (11.797, 19.337)
+
+
+```{r}
+# export csv
+# write.csv(rmse_tab, file = 'KY_model_eval.csv', row.names = FALSE)
+# 
+# write.csv(total_excess, file = 'KY_excess.csv', row.names = FALSE)
+```
+
+
