@@ -20,6 +20,10 @@ To replicate the results, follow the steps outlined below:
   - For Estimand 3, run the `Estimand3_KY.Rmd` script for Kentucky and the `Estimand3_MD.Rmd` script for rural Maryland.
   - For Estimand 6, run `Estimand6_MD.Rmd` script.
 
+All analyses and computations were carried out on 2023 MacBook Pro with an Apple M2 Pro chip, 16GB memory, and Ventura 13.6 operating system.
+
+All analyses were originally conducted using R version 4.3.2. Re-running the pipeline with updated R or package versions, or a different seed, may yield minor numerical differences.
+
 ## Code
 
 `Estimand1_KY.Rmd` - Estimate the total number and rate of pandemic deaths in Kentucky 
