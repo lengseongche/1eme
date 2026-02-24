@@ -8,7 +8,7 @@ We estimate three quantities:
 2. Estimand 3: Total number and rate of pandemic deaths in Kentucky and rural Maryland by 5-year age group 
 3. Estimand 6: Total number and rate of pandemic deaths in rural Maryland by binary race (White vs.\ Non-White)
 
-The pandemic period is defined as March 1918 through May 1920. Excess deaths are calculated as the sum, across pandemic months, of the difference between observed all-cause deaths and predicted counterfactual deaths. We used Bayesian negative binomial models from the `brms` package to construct monthly counterfactual death predictions based on pre-pandemic mortality patterns.
+The pandemic period is defined as March 1918 through May 1920. Excess deaths are calculated as the sum, across pandemic months, of the difference between observed all-cause deaths and predicted counterfactual deaths. We used Bayesian negative binomial modeling from the `brms` package to construct monthly counterfactual death predictions based on pre-pandemic mortality patterns.
 
 ## Replication
 To replicate the results, follow the steps outlined below:
