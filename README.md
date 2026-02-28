@@ -1,6 +1,6 @@
 # Overview
 
-This repository contains code to replicate the the estimation methods used to excess deaths related to the 1918–1920 H1N1 influenza pandemic as parts of the One Epidemic, Many Estimates (1EME) project. 
+This repository contains code to replicate the methods for estimating excess deaths related to the 1918–1920 H1N1 influenza pandemic as parts of the One Epidemic, Many Estimates (1EME) project. 
 
 We estimate three quantities:
 
